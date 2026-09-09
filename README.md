@@ -25,6 +25,9 @@
     *   使用者可即時剔除不需點名的課程，後端監控線程將自動同步篩選，節省網路頻寬與 CPU 資源。
 *   **🔔 Telegram Bot 即時推播**
     *   整合 Telegram Bot API，在**點名成功**、**程式啟動**或**發生異常**時，即時發送手機推播通知與蜂鳴器警報。
+*   **🤖 AI 作答建議（唯讀）**
+    *   偵測未作答題目並將可見文字、選項及題目圖片傳送到 OpenAI 相容 endpoint。
+    *   建議答案只會顯示於日誌並選擇性推播到 Telegram；程式不會選取或提交答案。
 *   **⚡ 線程安全與防卡死設計**
     *   將 Selenium 瀏覽器自動化與 GUI 主線程完全分離。
     *   使用 `queue.Queue` 進行線程安全的日誌與狀態更新，防止介面在執行 IO 密集任務時凍結。
@@ -99,6 +102,9 @@ python Zuvio.py --cli
 ```
 
 未列在 `course_gps` 中的課程會使用全域 `gps_str`；若全域 GPS 也未啟用，則使用系統定位。
+*   將 `ai_enabled` 設為 `true`，並設定完整的 chat completions endpoint、Bearer token 與模型名稱即可啟用唯讀 AI 建議。
+*   可使用環境變數 `AI_API_ENDPOINT`、`AI_API_TOKEN`、`AI_MODEL` 覆蓋檔案設定，避免將 API token 寫入磁碟。
+*   使用 `python Zuvio.py --ai-once` 可執行一次唯讀題目掃描並在取得 AI 建議後離開；此模式不會進入點名監控迴圈。
 
 ---
 

@@ -12,6 +12,7 @@ import queue
 import threading
 import argparse
 import re
+import shutil
 
 from selenium import webdriver
 import selenium.webdriver.chrome.webdriver
@@ -57,6 +58,7 @@ CONFIG_FILE_PATH = os.path.join(BASE_DIR, 'settings.json')
 LOG_FILE_PATH = os.path.join(BASE_DIR, 'zuvio_bot.log')
 
 URI = "https://irs.zuvio.com.tw/student5/irs/rollcall/{}"
+QUESTION_URI = "https://irs.zuvio.com.tw/student5/irs/clickers/{}"
 GUI_LOG_QUEUE = None  # 用於與 GUI 執行緒通訊的日誌佇列
 
 
@@ -107,7 +109,71 @@ def verify_telegram(bot_token: str, chat_id: str) -> bool:
 
 
 # ──────────────────────────────────────────────
-# [3.5] GPS 解析與轉換工具
+# [3.5] AI 作答建議模組（唯讀，不操作送出按鈕）
+# ──────────────────────────────────────────────
+def build_ai_messages(question_text: str, image_base64=None) -> list:
+    """建立 OpenAI 相容的多模態訊息內容。"""
+    content: list = [{
+        "type": "text",
+        "text": (
+            "請分析以下課堂題目並提供簡短的作答建議與理由。"
+            "這只是供使用者檢查的草稿，不要聲稱已提交答案。\n\n"
+            f"{question_text}"
+        )
+    }]
+    if image_base64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{image_base64}"}
+        })
+    return [
+        {
+            "role": "system",
+            "content": "你是課堂學習助理。提供解題提示與建議答案，讓使用者自行審閱。"
+        },
+        {"role": "user", "content": content}
+    ]
+
+
+def request_ai_suggestion(endpoint: str, token: str, model: str,
+                          question_text: str, image_base64=None) -> str:
+    """呼叫 OpenAI 相容的 chat completions endpoint。"""
+    payload = json.dumps({
+        "model": model,
+        "messages": build_ai_messages(question_text, image_base64),
+        "temperature": 0.2
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+
+    content = result["choices"][0]["message"]["content"]
+    if isinstance(content, str):
+        suggestion = content.strip()
+    elif isinstance(content, list):
+        suggestion = "\n".join(
+            part.get("text", "").strip()
+            for part in content
+            if isinstance(part, dict) and part.get("text")
+        ).strip()
+    else:
+        raise ValueError("AI endpoint 回傳了不支援的訊息格式")
+
+    if not suggestion:
+        raise ValueError("AI endpoint 未回傳作答建議")
+    return suggestion
+
+
+# ──────────────────────────────────────────────
+# [4] GPS 解析與轉換工具
 # ──────────────────────────────────────────────
 def parse_gps(gps_str: str):
     """
@@ -196,7 +262,19 @@ def build_driver(lat: float = None, lon: float = None) -> webdriver.Chrome:
     except Exception as e:
         errors.append(f"Selenium Manager 啟動失敗: {e}")
 
-    # 嘗試方式 2：使用 webdriver_manager 下載並載入驅動
+    # 嘗試方式 2：優先使用系統 PATH 中已安裝的驅動
+    if driver is None:
+        system_driver = shutil.which('chromedriver')
+        if system_driver:
+            try:
+                driver = webdriver.Chrome(
+                    service=Service(system_driver),
+                    options=options
+                )
+            except Exception as e:
+                errors.append(f"系統 ChromeDriver 啟動失敗: {e}")
+
+    # 嘗試方式 3：使用 webdriver_manager 下載並載入驅動
     if driver is None:
         try:
             service = Service(ChromeDriverManager().install())
@@ -249,6 +327,13 @@ class ZuvioBot:
         self.default_location = None
         self.current_location = None
         self.course_gps = {}
+        self.ai_enabled   = False
+        self.ai_endpoint  = ''
+        self.ai_token     = ''
+        self.ai_model     = ''
+        self.ai_question_retry_after = {}
+        self.ai_seen_questions = set()
+        self.ai_request_lock = threading.Lock()
         
         # 執行緒與 GUI 控制變數
         self.stop_event  = threading.Event()
@@ -262,6 +347,13 @@ class ZuvioBot:
         log("[驅動] 正在啟動 Chrome...")
         lat, lon = None, None
         cfg = self.load_config()
+        self.ai_enabled = cfg.get('ai_enabled', False)
+        self.ai_endpoint = str(os.environ.get('AI_API_ENDPOINT') or cfg.get('ai_endpoint') or '').strip()
+        self.ai_token = str(os.environ.get('AI_API_TOKEN') or cfg.get('ai_token') or '').strip()
+        self.ai_model = str(os.environ.get('AI_MODEL') or cfg.get('ai_model') or '').strip()
+        if self.ai_enabled and not all((self.ai_endpoint, self.ai_token, self.ai_model)):
+            log("[AI] 已啟用作答建議，但 endpoint、token 或 model 未完整設定。", level='warning')
+            self.ai_enabled = False
         if cfg.get('gps_enabled', False) and cfg.get('gps_str', '').strip():
             try:
                 lat, lon = parse_gps(cfg['gps_str'])
@@ -512,6 +604,117 @@ class ZuvioBot:
             if "大學生" not in x.text
         }
 
+    def get_unanswered_question(self, course_id: str):
+        """開啟題目頁並回傳第一個未作答題目的文字與可選圖片。"""
+        self.driver.get(QUESTION_URI.format(course_id))
+        cards = self.driver.find_elements(By.CLASS_NAME, 'i-c-l-q-question-box')
+
+        for card in cards:
+            if not card.find_elements(By.CLASS_NAME, 'i-c-l-q-q-b-b-mini-box-gray'):
+                continue
+
+            title_elements = card.find_elements(By.CLASS_NAME, 'i-c-l-q-q-b-title')
+            title = title_elements[0].text.strip() if title_elements else card.text.strip()
+            question_id = (
+                card.get_attribute('data-question-id')
+                or card.get_attribute('id')
+                or f"{course_id}:{title}"
+            )
+
+            retry_at = self.ai_question_retry_after.get(question_id, 0)
+            if question_id in self.ai_seen_questions or time.time() < retry_at:
+                continue
+
+            self.driver.execute_script("arguments[0].click();", card)
+
+            def find_matching_detail(driver):
+                elements = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".i-answer-content, [class*='i-a-c-q-t-q-b']"
+                )
+                matches = [
+                    element for element in elements
+                    if element.is_displayed()
+                    and element.text.strip()
+                    and title in element.text
+                ]
+                return max(matches, key=lambda element: len(element.text), default=False)
+
+            try:
+                detail = WebDriverWait(self.driver, 5).until(find_matching_detail)
+            except TimeoutException:
+                log(f"[AI] 題目內容尚未載入完成，稍後重試：{title}", level='warning')
+                return None
+
+            detail_text = detail.text.strip()
+            question_text = detail_text
+
+            image_base64 = None
+            if detail.find_elements(
+                By.CSS_SELECTOR,
+                "img, canvas, [style*='background-image']"
+            ):
+                image_base64 = detail.screenshot_as_base64
+
+            return question_id, question_text, image_base64
+
+        return None
+
+    def request_and_publish_suggestion(self, question_id: str, course_name: str,
+                                       question_text: str, image_base64=None,
+                                       raise_errors: bool = False):
+        """在背景呼叫 AI，避免阻塞點名監控。"""
+        try:
+            suggestion = request_ai_suggestion(
+                self.ai_endpoint,
+                self.ai_token,
+                self.ai_model,
+                question_text,
+                image_base64
+            )
+            self.ai_seen_questions.add(question_id)
+            log(f"[AI 作答建議] {course_name}\n{suggestion}")
+            self.notify(f"🤖 Zuvio AI 作答建議\n課程：{course_name}\n\n{suggestion}")
+            return True
+        except Exception as e:
+            log(f"[AI] {course_name} 取得作答建議失敗：{e}", level='warning')
+            if raise_errors:
+                raise
+            return False
+
+    def suggest_unanswered_question(self, course_id: str, course_name: str,
+                                    background: bool = True):
+        """為未作答題目取得建議；此流程不會選取或提交任何答案。"""
+        if not self.ai_enabled:
+            return False
+
+        question = self.get_unanswered_question(course_id)
+        if not question:
+            return False
+
+        question_id, question_text, image_base64 = question
+        with self.ai_request_lock:
+            retry_at = self.ai_question_retry_after.get(question_id, 0)
+            if question_id in self.ai_seen_questions or time.time() < retry_at:
+                return False
+            self.ai_question_retry_after[question_id] = time.time() + 300
+
+        if not background:
+            return self.request_and_publish_suggestion(
+                question_id,
+                course_name,
+                question_text,
+                image_base64,
+                raise_errors=True
+            )
+
+        threading.Thread(
+            target=self.request_and_publish_suggestion,
+            args=(question_id, course_name, question_text, image_base64),
+            daemon=True
+        ).start()
+        return True
+
     # ── 單次監控 session ─────────────────────────
     def run_session(self, courses: dict):
         # 計算實際監控數量
@@ -539,23 +742,22 @@ class ZuvioBot:
                         consecutive_driver_errors = 0
                         if self.sleep_interruptible(0.5):
                             return
-                        continue
+                    else:
+                        self.driver.execute_script(
+                            "arguments[0].click();",
+                            self.driver.find_element(By.ID, "submit-make-rollcall")
+                        )
 
-                    self.driver.execute_script(
-                        "arguments[0].click();",
-                        self.driver.find_element(By.ID, "submit-make-rollcall")
-                    )
+                        now_str = datetime.datetime.now().strftime('%H:%M:%S')
+                        log(f"[{now_str}] ★ {c_name} | 點名成功！")
 
-                    now_str = datetime.datetime.now().strftime('%H:%M:%S')
-                    log(f"[{now_str}] ★ {c_name} | 點名成功！")
+                        if BEEP_AVAILABLE:
+                            winsound.Beep(1500, 800)
 
-                    if BEEP_AVAILABLE:
-                        winsound.Beep(1500, 800)
-
-                    self.notify(
-                        f"📋 Zuvio 點名成功！\n課程：{c_name}\n時間：{now_str}"
-                    )
-                    consecutive_driver_errors = 0
+                        self.notify(
+                            f"📋 Zuvio 點名成功！\n課程：{c_name}\n時間：{now_str}"
+                        )
+                        consecutive_driver_errors = 0
 
                 except NoSuchElementException:
                     log(
@@ -595,6 +797,11 @@ class ZuvioBot:
                     self.notify(
                         f"❓ Zuvio Bot 未知錯誤\n課程：{c_name}\n原因：{str(e)[:200]}"
                     )
+
+                try:
+                    self.suggest_unanswered_question(c_id, c_name)
+                except WebDriverException as e:
+                    log(f"[AI] {c_name} 題目頁讀取失敗：{e}", level='warning')
 
                 if self.sleep_interruptible(2):
                     return
@@ -1213,10 +1420,15 @@ class ZuvioGUI(GUI_BASE_CLASS):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Zuvio 自動點名助手")
     parser.add_argument("--cli", action="store_true", help="以命令列 (CLI) 模式啟動")
+    parser.add_argument(
+        "--ai-once",
+        action="store_true",
+        help="唯讀掃描一次未作答題目、取得 AI 建議後離開"
+    )
     args = parser.parse_args()
 
     # 如果指定 --cli，或是環境不支援 GUI（未安裝 customtkinter），則走命令列模式
-    if args.cli or not GUI_AVAILABLE:
+    if args.cli or args.ai_once or not GUI_AVAILABLE:
         if not GUI_AVAILABLE and not args.cli:
             print("\n⚠️ 偵測到未安裝 customtkinter，將以命令列 (CLI) 模式啟動。")
             print("💡 若要使用精美圖形介面 (GUI)，請執行: pip install customtkinter\n")
@@ -1237,6 +1449,31 @@ if __name__ == "__main__":
         bot.tg_chat_id = cfg.get('tg_chat_id') if cfg.get('tg_enabled') else None
         bot.active_start = cfg.get('active_start', 8)
         bot.active_end   = cfg.get('active_end', 18)
+
+        if args.ai_once:
+            try:
+                bot.start_driver()
+                if not bot.ai_enabled:
+                    raise RuntimeError("AI 作答建議未啟用或設定不完整")
+                bot.login(cfg['user'], cfg['pass'])
+                course_list = bot.get_courses()
+                bot.monitored_course_ids = cfg.get('monitored_courses', None)
+
+                found = False
+                for c_id, c_name in course_list.items():
+                    if bot.monitored_course_ids is not None and c_id not in bot.monitored_course_ids:
+                        continue
+                    if bot.suggest_unanswered_question(c_id, c_name, background=False):
+                        found = True
+                        break
+                if not found:
+                    log("[AI] 目前沒有可讀取的未作答題目。")
+            except Exception as e:
+                log(f"[AI] 單次掃描失敗：{e}", level='error')
+                sys.exit(1)
+            finally:
+                bot.stop_driver()
+            sys.exit(0)
 
         # 若現在不在時段內，先等待，不需要啟動 driver
         if not bot.is_active_time():

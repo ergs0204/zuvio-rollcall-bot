@@ -15,5 +15,9 @@
   "course_gps": {
     "123456": "25.0330, 121.5654",
     "789012": "25°01'18.6\"N 121°27'48.2\"E"
-  }
+  },
+  "ai_enabled": false,
+  "ai_endpoint": "https://api.openai.com/v1/chat/completions",
+  "ai_token": "",
+  "ai_model": "gpt-4.1-mini"
 }
