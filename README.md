@@ -86,6 +86,7 @@ python Zuvio.py --cli
 ```
 
 *   若無設定檔，系統會引導填寫帳密與 Telegram 配置，隨後進入無頭瀏覽器監控循環。
+*   完整設定格式請參考 [`settings.json.example`](settings.json.example)，修改後另存為 `settings.json`。
 *   CLI 會讀取 `settings.json` 中的 `course_gps` 設定。鍵為課程 ID，值為該課程的 GPS 座標：
 
 ```json
