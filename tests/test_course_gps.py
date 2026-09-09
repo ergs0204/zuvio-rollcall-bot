@@ -1,6 +1,6 @@
 import unittest
 
-from Zuvio import ZuvioBot
+from Zuvio import ZuvioBot, normalize_course_gps
 
 
 class FakeDriver:
@@ -67,6 +67,35 @@ class CourseGpsTests(unittest.TestCase):
         self.bot.apply_course_location('course-1', 'Course 1')
 
         self.assertEqual(self.driver.commands, [])
+
+    def test_non_string_course_location_falls_back_without_crashing(self):
+        self.bot.default_location = (25.0, 121.0)
+        self.bot.current_location = (24.5, 120.5)
+        self.bot.course_gps = {'course-1': None}
+
+        self.bot.apply_course_location('course-1', 'Course 1')
+
+        self.assertEqual(
+            self.driver.commands[0],
+            ('Emulation.setGeolocationOverride', {
+                'latitude': 25.0,
+                'longitude': 121.0,
+                'accuracy': 100
+            })
+        )
+
+    def test_course_gps_config_is_normalized(self):
+        self.assertEqual(normalize_course_gps(None), {})
+        self.assertEqual(normalize_course_gps(['invalid']), {})
+        self.assertEqual(
+            normalize_course_gps({
+                'course-1': ' 25.0, 121.0 ',
+                'course-2': None,
+                'course-3': 123,
+                'course-4': '   '
+            }),
+            {'course-1': '25.0, 121.0'}
+        )
 
 
 if __name__ == '__main__':

@@ -152,6 +152,18 @@ def parse_gps(gps_str: str):
     raise ValueError("無法解析 GPS 格式")
 
 
+def normalize_course_gps(value) -> dict:
+    """將設定檔中的課程 GPS 正規化為非空字串映射。"""
+    if not isinstance(value, dict):
+        return {}
+
+    return {
+        str(course_id): gps_str.strip()
+        for course_id, gps_str in value.items()
+        if isinstance(gps_str, str) and gps_str.strip()
+    }
+
+
 # ──────────────────────────────────────────────
 # [4] 瀏覽器工廠
 # ──────────────────────────────────────────────
@@ -267,7 +279,8 @@ class ZuvioBot:
     def apply_course_location(self, course_id: str, course_name: str):
         """套用課程專屬定位；未設定時回退到全域定位或系統定位。"""
         location = self.default_location
-        gps_str = self.course_gps.get(course_id, '').strip()
+        gps_value = self.course_gps.get(course_id, '')
+        gps_str = gps_value.strip() if isinstance(gps_value, str) else ''
 
         if gps_str:
             try:
@@ -356,6 +369,10 @@ class ZuvioBot:
                     cfg['active_start'] = 8
                 if 'active_end' not in cfg:
                     cfg['active_end'] = 18
+                raw_course_gps = cfg.get('course_gps', {})
+                cfg['course_gps'] = normalize_course_gps(raw_course_gps)
+                if raw_course_gps != cfg['course_gps']:
+                    log("[設定] course_gps 已正規化，格式無效的項目已忽略。", level='warning')
                 return cfg
             except Exception:
                 pass
