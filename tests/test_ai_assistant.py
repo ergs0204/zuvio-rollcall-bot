@@ -20,24 +20,39 @@ class FakeResponse:
 
 
 class FakeElement:
-    def __init__(self, text='', element_id='', unanswered=False, has_image=False):
+    def __init__(self, text='', element_id='', unanswered=False, has_image=False,
+                 answer_state='', text_content=None, is_title=False):
         self.text = text
+        self.text_content = text if text_content is None else text_content
         self.element_id = element_id
         self.unanswered = unanswered
         self.has_image = has_image
+        self.answer_state = answer_state
+        self.is_title = is_title
         self.screenshot_as_base64 = 'question-image'
 
     def find_elements(self, by, value):
         if value == 'i-c-l-q-q-b-b-mini-box-gray':
             return [object()] if self.unanswered else []
         if value == 'i-c-l-q-q-b-title':
-            return [FakeElement(self.text)]
+            return [FakeElement(
+                '',
+                self.element_id,
+                text_content=self.text,
+                is_title=True
+            )]
         if value == "img, canvas, [style*='background-image']":
             return [object()] if self.has_image else []
         return []
 
     def get_attribute(self, name):
-        return self.element_id if name == 'data-question-id' else ''
+        if name == 'data-id' and self.is_title:
+            return self.element_id
+        if name == 'textContent':
+            return self.text_content
+        if name == 'onclick' and self.answer_state:
+            return f"GAFA_clickQuestion('{self.element_id}','essay','{self.answer_state}')"
+        return ''
 
     def is_displayed(self):
         return True
@@ -145,15 +160,35 @@ class AiAssistantTests(unittest.TestCase):
         driver = FakeDriver([seen, active], detail)
         bot = ZuvioBot()
         bot.driver = driver
-        bot.ai_seen_questions.add('seen-id')
+        bot.ai_seen_questions.add('course-1:seen-id')
 
         question = bot.get_unanswered_question('course-1')
 
         self.assertEqual(
             question,
-            ('active-id', 'Active question\nA. First\nB. Second', 'question-image')
+            ('course-1:active-id', 'Active question\nA. First\nB. Second', 'question-image')
         )
         self.assertEqual(driver.clicked, [active])
+
+    @patch('Zuvio.WebDriverWait', FakeWait)
+    def test_extractor_uses_card_answer_state_when_color_marker_changes(self):
+        active = FakeElement(
+            'New question',
+            'new-id',
+            unanswered=False,
+            answer_state='NO'
+        )
+        detail = FakeElement('New question\nWrite your response')
+        driver = FakeDriver([active], detail)
+        bot = ZuvioBot()
+        bot.driver = driver
+
+        question = bot.get_unanswered_question('course-1')
+
+        self.assertEqual(
+            question,
+            ('course-1:new-id', 'New question\nWrite your response', None)
+        )
 
 
 if __name__ == '__main__':

@@ -610,16 +610,29 @@ class ZuvioBot:
         cards = self.driver.find_elements(By.CLASS_NAME, 'i-c-l-q-question-box')
 
         for card in cards:
-            if not card.find_elements(By.CLASS_NAME, 'i-c-l-q-q-b-b-mini-box-gray'):
+            answer_state = re.search(
+                r"['\"](YES|NO)['\"]\s*\)\s*$",
+                card.get_attribute('onclick') or '',
+                re.IGNORECASE
+            )
+            is_unanswered = (
+                answer_state.group(1).upper() == 'NO'
+                if answer_state
+                else bool(card.find_elements(By.CLASS_NAME, 'i-c-l-q-q-b-b-mini-box-gray'))
+            )
+            if not is_unanswered:
                 continue
 
             title_elements = card.find_elements(By.CLASS_NAME, 'i-c-l-q-q-b-title')
-            title = title_elements[0].text.strip() if title_elements else card.text.strip()
-            question_id = (
-                card.get_attribute('data-question-id')
-                or card.get_attribute('id')
-                or f"{course_id}:{title}"
+            title_element = title_elements[0] if title_elements else None
+            title = (
+                (title_element.get_attribute('textContent') or '').strip()
+                if title_element else card.text.strip()
             )
+            raw_question_id = (
+                title_element.get_attribute('data-id') if title_element else None
+            ) or card.get_attribute('data-question-id') or card.get_attribute('id') or title
+            question_id = f"{course_id}:{raw_question_id}"
 
             retry_at = self.ai_question_retry_after.get(question_id, 0)
             if question_id in self.ai_seen_questions or time.time() < retry_at:
