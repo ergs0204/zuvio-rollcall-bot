@@ -643,7 +643,7 @@ class ZuvioBot:
             def find_matching_detail(driver):
                 elements = driver.find_elements(
                     By.CSS_SELECTOR,
-                    ".i-answer-content, [class*='i-a-c-q-t-q-b']"
+                    ".i-a-c-question-template"
                 )
                 matches = [
                     element for element in elements

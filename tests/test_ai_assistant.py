@@ -59,9 +59,10 @@ class FakeElement:
 
 
 class FakeDriver:
-    def __init__(self, cards, detail):
+    def __init__(self, cards, detail, legacy_detail=None):
         self.cards = cards
         self.detail = detail
+        self.legacy_detail = legacy_detail or detail
         self.clicked = []
 
     def get(self, url):
@@ -70,8 +71,10 @@ class FakeDriver:
     def find_elements(self, by, value):
         if value == 'i-c-l-q-question-box':
             return self.cards
-        if value == ".i-answer-content, [class*='i-a-c-q-t-q-b']":
+        if value == '.i-a-c-question-template':
             return [self.detail]
+        if value == ".i-answer-content, [class*='i-a-c-q-t-q-b']":
+            return [self.legacy_detail]
         return []
 
     def execute_script(self, script, element):
@@ -157,7 +160,11 @@ class AiAssistantTests(unittest.TestCase):
             'Active question\nA. First\nB. Second',
             has_image=True
         )
-        driver = FakeDriver([seen, active], detail)
+        driver = FakeDriver(
+            [seen, active],
+            detail,
+            legacy_detail=FakeElement('Active question')
+        )
         bot = ZuvioBot()
         bot.driver = driver
         bot.ai_seen_questions.add('course-1:seen-id')
